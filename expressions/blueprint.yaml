@@ -1,0 +1,147 @@
+name: Advanced Blueprint Example
+formatVersion: 1
+version: 1
+inputs:
+  platform:
+    type: string
+    title: Deploy to
+    oneOf:   # This type of list is fairly common, you could also use "enum" instead of "oneOf", the nice thing about "oneOf" is that you can provide a title and constraint in the list.
+      - title: AWS
+        const: aws
+      - title: Azure
+        const: azure
+      - title: vSphere
+        const: vsphere
+    default: vsphere 
+  image:
+    type: string #String with enumeration -enum, this will simply provide a dropdown
+    title: Operating System
+    description: Which OS to use
+    enum:
+      - Ubuntu
+      - Windows
+  dbenvsize:
+    type: string
+    enum:
+      - Small
+      - Large
+  Mtags:
+    type: array # Array of objects - syntax: $'{['key1', 'key2']}
+    title: Tags
+    description: tags to apply to machines
+    items:
+      type: object
+      properties:
+        key:
+          type: string
+          title: Key
+        value:
+          type: string
+          title: Value
+  username:
+    type: string
+    minLength: 4
+    maxLength: 20
+    pattern: '[a-z]+'
+    title: Database Username
+    description: Database Username
+  userpassword:
+    type: string
+    pattern: '[a-z0-9A-Z@#$]+'
+    encrypted: true
+    title: Database Password
+    description: Database Password
+  databaseDiskSize:
+    type: number
+    default: 4
+    maximum: 10
+    title: MySQL Data Disk Size
+    description: Size of database disk
+  clusterSize:
+    type: string # You can use custom inputs like clusterSize for conditions in the properties below, for instance this input will be used to determine the "count", small = 1 node for instance.
+    enum:
+      - small
+      - medium
+      - large
+    title: Wordpress Cluster Size
+    description: Wordpress Cluster Size
+  archiveDiskSize:
+    type: number
+    default: 4
+    maximum: 10
+    title: Wordpress Archive Disk Size
+    description: Size of Wordpress archive disk
+resources:
+  DBTier:
+    type: Cloud.Machine
+    properties:
+      name: mysql
+      image: Ubuntu-16
+      flavor: small
+      constraints:
+        - tag: '${"env:" + to_lower(input.platform)}' # this constraint is using a tag that will specify the cloud and lower case the input to match the tag case. there are other function operators besides to_lower, some of them are: to_upper, merge, trim, replace..
+      tags: '${input.Mtags}'
+      count: '${input.dbenvsize == "Small" ? 1 : 2}' # You can use conditions to determine things like size of the environment. You could also do something like: '${input.count < 5 && input.size == 'small'} , or '${input.count < 2 ? "small" : "large}'. Other
+      networks:
+        - name: '${resource.WP_Network.name}' # Resource variables let you bind to resource properties from other resources ex. - ${resource.app[0].id}
+          network: '${resource.WP_Network.id}'
+      remoteAccess:
+        authentication: usernamePassword #remote access property enables you to specify a remote access mechanism for the deployed machine
+        username: '${input.username}'
+        password: '${input.userpassword}'
+      ACMECorpID: 9333 #You can add custom properties to the YAML. Then these properties can be used to kick off an extensiblity subscription for instance. This custom property will kick off a subscription called ACME Hello World.
+      cloudConfig: |
+        #cloud-config
+        repo_update: true
+        repo_upgrade: all
+
+        packages:
+         - mysql-server
+
+        runcmd:
+         - sed -e '/bind-address/ s/^#*/#/' -i /etc/mysql/mysql.conf.d/mysqld.cnf
+         - service mysql restart
+         - mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'mysqlpassword';"
+         - mysql -e "FLUSH PRIVILEGES;"
+      attachedDisks: []
+  WebTier:
+    type: Cloud.Machine
+    properties:
+      name: wordpress
+      image: Ubuntu-16
+      count: '${input.clusterSize== "small" ? 2 : (input.clusterSize == "medium" ? 3 : 4)}'
+      tags:
+        - key: cas.requestedBy
+          value: '${env.requestedBy}' # Environmental variables can be helpful if you want to get info about the object displayed in the properties section of the deployment, other examples - {env.blueprintID}
+      ACMECorpID: 9333
+      constraints:
+        - tag: '${"env:" + to_lower(input.platform)}'
+      flavor: small
+      networks:
+        - name: '${resource.WP_Network.name}'
+          network: '${resource.WP_Network.id}'
+      cloudConfig: |
+        #cloud-config
+        repo_update: true
+        repo_upgrade: all
+
+        packages:
+         - apache2
+         - php
+         - php-mysql
+         - libapache2-mod-php
+         - php-mcrypt
+         - mysql-client
+         
+        runcmd:
+         - mkdir -p /var/www/html/mywordpresssite && cd /var/www/html && wget https://wordpress.org/latest.tar.gz && tar -xzf /var/www/html/latest.tar.gz -C /var/www/html/mywordpresssite --strip-components 1
+         - i=0; while [ $i -le 5 ]; do mysql --connect-timeout=3 -h ${DBTier.networks[0].address} -u root -pmysqlpassword -e "SHOW STATUS;" && break || sleep 15; i=$((i+1)); done
+         - mysql -u root -pmysqlpassword -h ${resource.DBTier.networks[0].address} -e "create database wordpress_blog;"
+         - mv /var/www/html/mywordpresssite/wp-config-sample.php /var/www/html/mywordpresssite/wp-config.php
+         - sed -i -e s/"define('DB_NAME', 'database_name_here');"/"define('DB_NAME', 'wordpress_blog');"/ /var/www/html/mywordpresssite/wp-config.php && sed -i -e s/"define('DB_USER', 'username_here');"/"define('DB_USER', 'root');"/ /var/www/html/mywordpresssite/wp-config.php && sed -i -e s/"define('DB_PASSWORD', 'password_here');"/"define('DB_PASSWORD', 'mysqlpassword');"/ /var/www/html/mywordpresssite/wp-config.php && sed -i -e s/"define('DB_HOST', 'localhost');"/"define('DB_HOST', '${resource.DBTier.networks[0].address}');"/ /var/www/html/mywordpresssite/wp-config.php
+         - service apache2 reload
+  WP_Network:
+    type: Cloud.Network
+    properties:
+      name: WP_Network
+      networkType: existing
